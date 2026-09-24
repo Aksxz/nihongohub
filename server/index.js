@@ -4,7 +4,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { connectDB, getDBStatus } from './config/db.js';
-import { verifySmtpConnection } from './services/emailService.js';
+import { verifyEmailService } from './services/emailService.js';
 
 // Route imports
 import authRoutes from './routes/auth.js';
@@ -141,7 +141,7 @@ app.use((req, res) => {
 // Start Express server and connect to MongoDB Atlas
 async function startServer() {
   await connectDB();
-  await verifySmtpConnection();
+  await verifyEmailService();
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`

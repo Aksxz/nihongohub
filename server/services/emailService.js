@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 
 // In-memory registry for test runner verification only (never exposed via API or logs)
 let _lastTestOtpStore = {};
@@ -18,54 +18,37 @@ export const _clearTestOtp = (email) => {
 };
 
 /**
- * Creates and returns configured Nodemailer transporter with normalized credentials
+ * Returns Resend client instance if RESEND_API_KEY is configured
  */
-export const createTransporter = () => {
-  const host = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
-  const port = parseInt(process.env.SMTP_PORT || '587', 10);
-  const user = process.env.SMTP_USER?.trim();
-  const rawPass = process.env.SMTP_PASSWORD;
-  // Safely normalize Google App Password: strip internal spaces and surrounding whitespace
-  const pass = rawPass ? rawPass.replace(/\s+/g, '').trim() : undefined;
-
-  if (!user || !pass) {
-    return null;
+let _resendClient = null;
+export const getResendClient = () => {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  if (!apiKey) return null;
+  if (!_resendClient) {
+    _resendClient = new Resend(apiKey);
   }
-
-  return nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465, // true for 465, false for other ports (587 uses STARTTLS)
-    auth: {
-      user,
-      pass
-    }
-  });
+  return _resendClient;
 };
 
 /**
- * Verifies SMTP connection safely without exposing sensitive credentials
+ * Lightweight verification of Email/Resend configuration during server startup
+ * Does NOT send a real email or block startup.
  */
-export const verifySmtpConnection = async () => {
-  const transporter = createTransporter();
-  if (!transporter) {
-    console.log('[SMTP] ⚠️  SMTP credentials not configured (SMTP_USER or SMTP_PASSWORD missing in .env)');
+export const verifyEmailService = async () => {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const from = (process.env.EMAIL_FROM || 'NihongoHub <onboarding@resend.dev>').trim();
+
+  if (!apiKey) {
+    console.log('[Email] ⚠️  RESEND_API_KEY is not configured in environment variables. Email/OTP delivery will be disabled until configured.');
     return false;
   }
 
-  try {
-    await transporter.verify();
-    console.log(`[SMTP] ✓ SMTP connection successful (Connected to ${process.env.SMTP_HOST || 'smtp.gmail.com'}:${process.env.SMTP_PORT || '587'})`);
-    return true;
-  } catch (error) {
-    console.error('[SMTP] ✗ SMTP connection failed:', {
-      code: error.code || 'AUTH_FAILED',
-      command: error.command || 'VERIFY',
-      response: error.response || error.message
-    });
-    return false;
-  }
+  console.log(`[Email] ✓ Resend HTTPS Email API configured (Sender: ${from})`);
+  return true;
 };
+
+// Backward compatibility alias for any existing imports
+export const verifySmtpConnection = verifyEmailService;
 
 /**
  * Branded NihongoHub HTML email template wrapper
@@ -124,7 +107,7 @@ const renderEmailTemplate = ({ title, subtitle, otp, warningMessage }) => {
 };
 
 /**
- * Sends Signup Verification OTP Email
+ * Sends Signup Verification OTP Email via Resend HTTPS API
  * @param {string} email 
  * @param {string} otp 
  */
@@ -136,8 +119,16 @@ export const sendSignupOTP = async (email, otp) => {
 
   _lastTestOtpStore[normalizedEmail] = otp;
 
-  const transporter = createTransporter();
-  const from = (process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@nihongohub.com').trim();
+  const resend = getResendClient();
+  if (!resend) {
+    if (process.env.NODE_ENV === 'test') {
+      return { success: true, simulated: true };
+    }
+    console.error('[Email] ✗ Cannot send OTP email: RESEND_API_KEY is not configured in environment variables');
+    throw new Error('Unable to send OTP. Please try again.');
+  }
+
+  const from = (process.env.EMAIL_FROM || 'NihongoHub <onboarding@resend.dev>').trim();
 
   const html = renderEmailTemplate({
     title: 'Verify Your NihongoHub Account',
@@ -146,37 +137,40 @@ export const sendSignupOTP = async (email, otp) => {
     warningMessage: 'This code will expire in <strong>5 minutes</strong>. If you did not create an account on NihongoHub, please disregard this email.'
   });
 
-  if (!transporter) {
-    if (process.env.NODE_ENV === 'test') {
-      return { success: true, simulated: true };
-    }
-    console.error('[SMTP] ✗ Cannot send OTP email: SMTP transporter is not configured in .env');
-    throw new Error('Unable to send OTP. Please try again.');
-  }
-
   try {
-    const info = await transporter.sendMail({
-      from: `"NihongoHub" <${from}>`,
+    const response = await resend.emails.send({
+      from,
       to: normalizedEmail,
       subject: 'Verify Your NihongoHub Account',
       text: `Your NihongoHub verification code is: ${otp}. It expires in 5 minutes.`,
       html
     });
-    console.log(`[SMTP] ✓ Signup OTP email sent successfully to: ${normalizedEmail} (MessageId: ${info.messageId})`);
-    return { success: true, messageId: info.messageId };
+
+    if (response.error) {
+      console.error('[Email] ✗ Resend delivery error:', {
+        recipient: normalizedEmail,
+        name: response.error.name || 'ResendError',
+        message: response.error.message || 'Failed to dispatch email'
+      });
+      throw new Error('Unable to send OTP. Please try again.');
+    }
+
+    console.log(`[Email] ✓ Signup OTP email sent successfully via Resend to: ${normalizedEmail} (Id: ${response.data?.id})`);
+    return { success: true, messageId: response.data?.id };
   } catch (error) {
-    console.error('[SMTP] ✗ Signup OTP email sending failed:', {
+    if (error.message === 'Unable to send OTP. Please try again.') {
+      throw error;
+    }
+    console.error('[Email] ✗ Signup OTP email sending failed:', {
       recipient: normalizedEmail,
-      code: error.code || 'UNKNOWN',
-      command: error.command || 'SENDMAIL',
-      response: error.response || error.message
+      message: error.message || 'Unknown network error'
     });
     throw new Error('Unable to send OTP. Please try again.');
   }
 };
 
 /**
- * Sends Login Verification OTP Email
+ * Sends Login Verification OTP Email via Resend HTTPS API
  * @param {string} email 
  * @param {string} otp 
  */
@@ -188,8 +182,16 @@ export const sendLoginOTP = async (email, otp) => {
 
   _lastTestOtpStore[normalizedEmail] = otp;
 
-  const transporter = createTransporter();
-  const from = (process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@nihongohub.com').trim();
+  const resend = getResendClient();
+  if (!resend) {
+    if (process.env.NODE_ENV === 'test') {
+      return { success: true, simulated: true };
+    }
+    console.error('[Email] ✗ Cannot send OTP email: RESEND_API_KEY is not configured in environment variables');
+    throw new Error('Unable to send OTP. Please try again.');
+  }
+
+  const from = (process.env.EMAIL_FROM || 'NihongoHub <onboarding@resend.dev>').trim();
 
   const html = renderEmailTemplate({
     title: 'Your NihongoHub Login OTP',
@@ -198,37 +200,40 @@ export const sendLoginOTP = async (email, otp) => {
     warningMessage: 'This code expires in <strong>5 minutes</strong>. <strong>Never share this code with anyone.</strong> If you did not initiate this login, your credentials may be compromised.'
   });
 
-  if (!transporter) {
-    if (process.env.NODE_ENV === 'test') {
-      return { success: true, simulated: true };
-    }
-    console.error('[SMTP] ✗ Cannot send OTP email: SMTP transporter is not configured in .env');
-    throw new Error('Unable to send OTP. Please try again.');
-  }
-
   try {
-    const info = await transporter.sendMail({
-      from: `"NihongoHub" <${from}>`,
+    const response = await resend.emails.send({
+      from,
       to: normalizedEmail,
       subject: 'Your NihongoHub Login OTP',
       text: `Your NihongoHub login verification code is: ${otp}. It expires in 5 minutes.`,
       html
     });
-    console.log(`[SMTP] ✓ Login OTP email sent successfully to: ${normalizedEmail} (MessageId: ${info.messageId})`);
-    return { success: true, messageId: info.messageId };
+
+    if (response.error) {
+      console.error('[Email] ✗ Resend delivery error:', {
+        recipient: normalizedEmail,
+        name: response.error.name || 'ResendError',
+        message: response.error.message || 'Failed to dispatch email'
+      });
+      throw new Error('Unable to send OTP. Please try again.');
+    }
+
+    console.log(`[Email] ✓ Login OTP email sent successfully via Resend to: ${normalizedEmail} (Id: ${response.data?.id})`);
+    return { success: true, messageId: response.data?.id };
   } catch (error) {
-    console.error('[SMTP] ✗ Login OTP email sending failed:', {
+    if (error.message === 'Unable to send OTP. Please try again.') {
+      throw error;
+    }
+    console.error('[Email] ✗ Login OTP email sending failed:', {
       recipient: normalizedEmail,
-      code: error.code || 'UNKNOWN',
-      command: error.command || 'SENDMAIL',
-      response: error.response || error.message
+      message: error.message || 'Unknown network error'
     });
     throw new Error('Unable to send OTP. Please try again.');
   }
 };
 
 /**
- * Development test email sender (for verification only)
+ * Safe development test email sender (for verification only)
  */
 export const sendTestEmail = async (toEmail) => {
   const normalizedEmail = (toEmail || '').toLowerCase().trim();
@@ -236,25 +241,30 @@ export const sendTestEmail = async (toEmail) => {
     throw new Error('Invalid recipient email address.');
   }
 
-  const transporter = createTransporter();
-  if (!transporter) {
-    throw new Error('SMTP transporter is not configured.');
+  const resend = getResendClient();
+  if (!resend) {
+    throw new Error('RESEND_API_KEY is not configured in environment variables.');
   }
 
-  const from = (process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@nihongohub.com').trim();
-  const info = await transporter.sendMail({
-    from: `"NihongoHub" <${from}>`,
+  const from = (process.env.EMAIL_FROM || 'NihongoHub <onboarding@resend.dev>').trim();
+  const response = await resend.emails.send({
+    from,
     to: normalizedEmail,
-    subject: 'NihongoHub SMTP Test',
-    text: 'This is a test email from NihongoHub.',
-    html: '<p>This is a test email from NihongoHub.</p>'
+    subject: 'NihongoHub Email Service Test',
+    text: 'This is a test email from NihongoHub via Resend HTTPS API.',
+    html: '<p>This is a test email from <strong>NihongoHub</strong> via Resend HTTPS API.</p>'
   });
 
-  return { success: true, messageId: info.messageId, response: info.response };
+  if (response.error) {
+    throw new Error(response.error.message || 'Resend test email failed');
+  }
+
+  return { success: true, messageId: response.data?.id };
 };
 
 export const emailService = {
-  createTransporter,
+  getResendClient,
+  verifyEmailService,
   verifySmtpConnection,
   sendSignupOTP,
   sendLoginOTP,
