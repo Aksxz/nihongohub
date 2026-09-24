@@ -50,7 +50,12 @@ const userSchema = new mongoose.Schema(
 
 // Method to verify password
 userSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.passwordHash);
+  if (!this.passwordHash || !enteredPassword) return false;
+  try {
+    return await bcrypt.compare(enteredPassword, this.passwordHash);
+  } catch (err) {
+    return false;
+  }
 };
 
 // Transform to remove sensitive information on JSON serialization

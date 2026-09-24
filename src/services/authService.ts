@@ -177,23 +177,88 @@ export class AuthService {
   }
 
   /**
-   * Legacy Direct Signup fallback
+   * Fetches the server configured authentication mode ('password' or 'otp')
+   */
+  public async getAuthMode(): Promise<'password' | 'otp'> {
+    try {
+      const res = await api.auth.getConfig();
+      if (res.success && res.authMode) {
+        return res.authMode;
+      }
+    } catch (_) {}
+    return 'password';
+  }
+
+  /**
+   * Password-Mode Direct Signup (or throws if in OTP mode)
    */
   public async signup(
     fullName: string,
     email: string,
     password: string,
+    confirmPassword?: string,
     selectedLevel: JLPTLevel = 'N5'
   ): Promise<UserSession> {
-    await this.initiateSignup(fullName, email, password, undefined, selectedLevel);
+    const normalizedEmail = email.trim().toLowerCase();
+    const res = await api.auth.signup({
+      name: fullName.trim(),
+      email: normalizedEmail,
+      password,
+      confirmPassword,
+      selectedLevel
+    });
+
+    if (!res.success) {
+      throw new Error((res as any).message || 'Registration failed. Please try again.');
+    }
+
+    if (res.token && res.user) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, res.token);
+      const session: UserSession = {
+        userId: res.user.id || res.user._id,
+        email: res.user.email,
+        fullName: res.user.name,
+        selectedLevel: res.user.selectedLevel || 'N5',
+        role: res.user.role || 'user',
+        token: res.token,
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+      };
+      this.saveSession(session);
+      return session;
+    }
+
     throw new Error('Please verify the OTP sent to your email to complete registration.');
   }
 
   /**
-   * Legacy Direct Login fallback
+   * Password-Mode Direct Login (or throws if in OTP mode)
    */
   public async login(email: string, password: string): Promise<UserSession> {
-    await this.initiateLogin(email, password);
+    const normalizedEmail = email.trim().toLowerCase();
+    const res = await api.auth.login({
+      email: normalizedEmail,
+      password
+    });
+
+    if (!res.success) {
+      throw new Error((res as any).message || 'Invalid email or password.');
+    }
+
+    if (res.token && res.user) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, res.token);
+      const session: UserSession = {
+        userId: res.user.id || res.user._id,
+        email: res.user.email,
+        fullName: res.user.name,
+        selectedLevel: res.user.selectedLevel || 'N5',
+        role: res.user.role || 'user',
+        token: res.token,
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000
+      };
+      this.saveSession(session);
+      return session;
+    }
+
     throw new Error('Please verify the OTP sent to your email to complete sign in.');
   }
 

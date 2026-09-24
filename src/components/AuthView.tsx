@@ -25,6 +25,7 @@ type AuthMode = 'login' | 'signup' | 'login_otp' | 'signup_otp';
 
 export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorMessage }) => {
   const [mode, setMode] = useState<AuthMode>('login');
+  const [authMode, setAuthMode] = useState<'password' | 'otp'>('password');
   
   // Form fields
   const [fullName, setFullName] = useState('');
@@ -43,6 +44,14 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
   const [isResending, setIsResending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(initialErrorMessage || null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    authService.getAuthMode().then((m) => {
+      if (isMounted) setAuthMode(m);
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, []);
 
   useEffect(() => {
     if (initialErrorMessage) {
@@ -94,7 +103,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
     }
 
     if (mode === 'signup') {
-      if (!fullName.trim()) {
+      if (authMode === 'otp' && !fullName.trim()) {
         setErrorMessage('Please enter your full name.');
         return;
       }
@@ -110,6 +119,32 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
 
     setIsLoading(true);
 
+    if (authMode === 'password') {
+      try {
+        if (mode === 'signup') {
+          const session = await authService.signup(
+            fullName.trim() || email.split('@')[0],
+            email,
+            password,
+            confirmPassword,
+            selectedLevel
+          );
+          setSuccessMessage('Account created successfully! Loading your dashboard...');
+          setTimeout(() => onAuthSuccess(session), 400);
+        } else {
+          const session = await authService.login(email, password);
+          setSuccessMessage('Welcome back! Loading your dashboard...');
+          setTimeout(() => onAuthSuccess(session), 400);
+        }
+      } catch (err: any) {
+        setErrorMessage(err.message || 'Authentication failed. Please check your credentials.');
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // OTP mode
     try {
       if (mode === 'signup') {
         const res = await authService.initiateSignup(fullName, email, password, confirmPassword, selectedLevel);
@@ -276,8 +311,8 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
           {(mode === 'login' || mode === 'signup') && (
             <form onSubmit={handleCredentialsSubmit} className="space-y-4">
               
-              {/* Full Name (Sign Up only) */}
-              {mode === 'signup' && (
+              {/* Full Name (Sign Up only, OTP mode) */}
+              {mode === 'signup' && authMode === 'otp' && (
                 <div>
                   <label className="block text-xs font-bold text-[#6e6b66] uppercase tracking-wider mb-1.5">
                     Full Name
@@ -360,8 +395,8 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
                 </div>
               )}
 
-              {/* Target JLPT Level (Sign Up only) */}
-              {mode === 'signup' && (
+              {/* Target JLPT Level (Sign Up only, OTP mode) */}
+              {mode === 'signup' && authMode === 'otp' && (
                 <div>
                   <label className="block text-xs font-bold text-[#6e6b66] uppercase tracking-wider mb-1.5 flex items-center justify-between">
                     <span>Target JLPT Level</span>
@@ -397,7 +432,11 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
                     <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   ) : (
                     <>
-                      <span>{mode === 'login' ? 'Send Login OTP' : 'Send Verification OTP'}</span>
+                      <span>
+                        {authMode === 'password'
+                          ? (mode === 'login' ? 'Sign In' : 'Create Account')
+                          : (mode === 'login' ? 'Send Login OTP' : 'Send Verification OTP')}
+                      </span>
                       <ArrowRight className="w-4 h-4" />
                     </>
                   )}
@@ -502,7 +541,9 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialErrorM
           {/* Security Notice */}
           <div className="mt-6 pt-5 border-t border-[#f2f0ea] text-center">
             <p className="text-[11px] text-[#8c8880]">
-              🔐 Protected by Gmail SMTP One-Time Password verification and single-device session control.
+              {authMode === 'password'
+                ? '🔐 Your account is protected with secure password authentication.'
+                : '🔐 Protected by One-Time Password verification and single-device session control.'}
             </p>
           </div>
         </div>

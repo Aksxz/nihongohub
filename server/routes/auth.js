@@ -32,13 +32,33 @@ const hashOtp = (otp) => {
   return crypto.createHash('sha256').update(otp.toString().trim()).digest('hex');
 };
 
+/**
+ * Resolves active authentication mode: 'password' or 'otp'.
+ * Default: 'password'
+ */
+const getAuthMode = () => {
+  return (process.env.AUTH_MODE || 'password').toLowerCase().trim() === 'otp' ? 'otp' : 'password';
+};
+
+/**
+ * @route   GET /api/auth/config
+ * @desc    Get safe client authentication mode (never reveals any secrets)
+ * @access  Public
+ */
+router.get('/config', (req, res) => {
+  return res.status(200).json({
+    success: true,
+    authMode: getAuthMode()
+  });
+});
+
 // ==========================================
 // 1. SIGNUP & SIGNUP OTP
 // ==========================================
 
 /**
  * @route   POST /api/auth/signup (and alias /register)
- * @desc    Validate signup details, generate 6-digit OTP, send email. User doc NOT created yet.
+ * @desc    Validate signup details. If password mode: creates user directly. If OTP mode: sends OTP.
  * @access  Public
  */
 const handleSignup = async (req, res) => {
@@ -50,13 +70,22 @@ const handleSignup = async (req, res) => {
       });
     }
 
-    const name = req.body.name || req.body.fullName;
+    const authMode = getAuthMode();
+    const rawName = req.body.name || req.body.fullName;
     const { email, password, confirmPassword, selectedLevel } = req.body;
 
-    if (!name || !email || !password) {
+    if (!email || !password) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide name, email, and password.'
+        message: 'Please provide email and password.'
+      });
+    }
+
+    // In OTP mode, name is strictly required
+    if (authMode === 'otp' && !rawName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide your full name.'
       });
     }
 
@@ -92,6 +121,43 @@ const handleSignup = async (req, res) => {
       });
     }
 
+    // Hash password securely with bcrypt
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    // ==========================================
+    // PASSWORD MODE DIRECT SIGNUP
+    // ==========================================
+    if (authMode === 'password') {
+      const totalUsers = await User.countDocuments();
+      const role = totalUsers === 0 ? 'admin' : 'user';
+      const sessionId = crypto.randomUUID();
+      const finalName = (rawName || email.split('@')[0] || 'Student').trim();
+
+      const newUser = await User.create({
+        name: finalName,
+        email: normalizedEmail,
+        passwordHash,
+        role,
+        selectedLevel: selectedLevel || 'N5',
+        emailVerified: true,
+        activeSessionId: sessionId,
+        lastActivityAt: new Date()
+      });
+
+      const token = generateToken(newUser._id, sessionId);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Account created successfully.',
+        token,
+        user: newUser.toSafeObject()
+      });
+    }
+
+    // ==========================================
+    // OTP MODE SIGNUP FLOW (PRESERVED)
+    // ==========================================
     // Check resend rate-limit (60s cooldown)
     const existingOtp = await OTP.findOne({ email: normalizedEmail, purpose: 'signup' });
     if (existingOtp && existingOtp.lastResentAt && (Date.now() - new Date(existingOtp.lastResentAt).getTime()) < 60000) {
@@ -100,10 +166,6 @@ const handleSignup = async (req, res) => {
         message: 'Please wait before requesting another OTP.'
       });
     }
-
-    // Hash password securely with bcrypt
-    const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
 
     // Generate secure 6-digit OTP
     const otp = generate6DigitOtp();
@@ -119,7 +181,7 @@ const handleSignup = async (req, res) => {
         purpose: 'signup',
         otpHash,
         signupData: {
-          name: name.trim(),
+          name: (rawName || 'Student').trim(),
           passwordHash,
           selectedLevel: selectedLevel || 'N5'
         },
@@ -383,6 +445,30 @@ router.post('/login', async (req, res) => {
       });
     }
 
+    const authMode = getAuthMode();
+
+    // ==========================================
+    // PASSWORD MODE DIRECT LOGIN
+    // ==========================================
+    if (authMode === 'password') {
+      const sessionId = crypto.randomUUID();
+      user.activeSessionId = sessionId;
+      user.emailVerified = true;
+      user.lastActivityAt = new Date();
+      await user.save();
+
+      const token = generateToken(user._id, sessionId);
+
+      return res.status(200).json({
+        success: true,
+        token,
+        user: user.toSafeObject()
+      });
+    }
+
+    // ==========================================
+    // OTP MODE LOGIN FLOW (PRESERVED)
+    // ==========================================
     // Check resend rate-limit (60s cooldown)
     const existingOtp = await OTP.findOne({ email: normalizedEmail, purpose: 'login' });
     if (existingOtp && existingOtp.lastResentAt && (Date.now() - new Date(existingOtp.lastResentAt).getTime()) < 60000) {

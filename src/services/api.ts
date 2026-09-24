@@ -87,8 +87,11 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 export const api = {
   // Authentication
   auth: {
-    signup: (userData: { name: string; email: string; password: string; confirmPassword?: string; selectedLevel?: string }) =>
-      request<{ success: boolean; otpPending: boolean; message: string }>('/auth/signup', {
+    getConfig: () =>
+      request<{ success: boolean; authMode: 'password' | 'otp' }>('/auth/config'),
+
+    signup: (userData: { name?: string; email: string; password: string; confirmPassword?: string; selectedLevel?: string }) =>
+      request<{ success: boolean; otpPending?: boolean; token?: string; user?: any; message: string }>('/auth/signup', {
         method: 'POST',
         body: JSON.stringify(userData)
       }),
@@ -100,8 +103,8 @@ export const api = {
       }),
 
     // Legacy register alias
-    register: (userData: { name: string; email: string; password: string; selectedLevel?: string }) =>
-      request<{ success: boolean; otpPending: boolean; message: string }>('/auth/register', {
+    register: (userData: { name?: string; email: string; password: string; selectedLevel?: string }) =>
+      request<{ success: boolean; otpPending?: boolean; token?: string; user?: any; message: string }>('/auth/register', {
         method: 'POST',
         body: JSON.stringify(userData)
       }),
